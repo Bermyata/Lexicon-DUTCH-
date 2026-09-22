@@ -134,7 +134,9 @@ function save(){S.ts=Date.now();try{localStorage.setItem(KEY,JSON.stringify(S))}
 var cloud={db:null,uid:null,ok:false,last:{},timer:null,busy:false,again:false,state:"local",count:0,allow:false};
 var MAX_BKS=10;
 function chunkOf(id){return Math.floor(Number(id)/500)}
-function cpath(name){return "data-nl/users/"+cloud.uid+"/"+name}
+/* data/users/<uid>/ is the viewer's private subtree; LEGACY is where older versions wrote by mistake */
+var ROOT="data/users/",LEGACY="data-nl/users/";
+function cpath(name){return ROOT+cloud.uid+"/"+name}
 function chunkData(words){words=words||S.words;var ch={},str={};for(var k in words){var n=chunkOf(k);(ch[n]=ch[n]||{})[k]=words[k]}for(var n in ch)str[n]=JSON.stringify(ch[n]);return{ch:ch,str:str}}
 function wordCount(w){return Object.keys(w).length}
 function learnedCount(w){var n=0;for(var k in w)if(w[k].s==="R")n++;return n}
@@ -169,8 +171,8 @@ function syncNow(){
     })
   }).catch(function(){done("Не удалось связаться с облаком. Попробуйте ещё раз.")})
 }
-function pullRemote(){
-  return cloud.db.collection("data/users/"+cloud.uid).get().then(function(snap){
+function pullRemote(root){
+  return cloud.db.collection((root||ROOT)+cloud.uid).get().then(function(snap){
     var rem={words:{},credits:0,day:"",newToday:0,ts:0,bks:[]},has=false,bk={};
     snap.docs.forEach(function(d){var x=d.data()||{},id=d.id,m;
       if(id==="meta"){has=true;rem.credits=x.credits||0;rem.day=x.day||"";rem.newToday=x.newToday||0;rem.ts=x.ts||0;rem.bks=JSON.parse(JSON.stringify(x.bks||[]))}
@@ -217,11 +219,21 @@ function cloudInit(){
     db=r[0];user=r[1];if(!db||!user)return null;return user.id()
   }).then(function(uid){
     if(!uid)return null;cloud.db=db;cloud.uid=uid;
-    return pullRemote()
+    return pullRemote().then(function(r){
+      if(r.has)return r;
+      /* nothing in the right place yet: pick up progress saved under the old path */
+      return pullRemote(LEGACY).then(function(o){if(o.has)o.legacy=true;return o},function(){return r})
+    })
+  }).then(function(r){
+    if(!r||!r.legacy)return r;
+    var jobs=[];
+    Object.keys(r.bk).forEach(function(k){Object.keys(r.bk[k]).forEach(function(n){jobs.push(function(){return cloud.db.doc(cpath("b_"+k+"_"+n)).set(r.bk[k][n])})})});
+    var p=Promise.resolve();jobs.forEach(function(j){p=p.then(j)});
+    return p.then(function(){return r})
   }).then(function(r){
     if(!r)return;
     cloud.ok=true;cloud.state="cloud";
-    if(r.has&&(!S.ts||r.rem.ts>=(S.ts||0))){adopt(r.rem)}
+    if(r.has&&(!S.ts||r.rem.ts>=(S.ts||0))){adopt(r.rem);if(r.legacy){cloud.last={};queueSync()}}
     else{cloud.last={};cloud.count=r.has?wordCount(r.rem.words):0;if(r.has)S.bks=r.rem.bks;queueSync()}
     render();
     /* daily snapshot of the state as it was before today's work */
